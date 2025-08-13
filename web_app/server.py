@@ -43,7 +43,6 @@ import html
 
 from threading import Thread
 from RTKLIB import RTKLIB
-from ServiceController import ServiceController
 from RTKBaseConfigManager import RTKBaseConfigManager
 import network_infos
 
@@ -97,19 +96,6 @@ rtk = RTKLIB(socketio,
             rtklib_path=path_to_rtklib,
             log_path=app.config["DOWNLOAD_FOLDER"],
             )
-
-services_list = [{"service_unit" : "str2str_tcp.service", "name" : "main"},
-                 {"service_unit" : "str2str_ntrip_A.service", "name" : "ntrip_A"},
-                 {"service_unit" : "str2str_ntrip_B.service", "name" : "ntrip_B"},
-                 {"service_unit" : "str2str_local_ntrip_caster.service", "name" : "local_ntrip_caster"},
-                 {"service_unit" : "str2str_rtcm_svr.service", "name" : "rtcm_svr"},
-                 {'service_unit' : 'str2str_rtcm_serial.service', "name" : "rtcm_serial"},
-                 {"service_unit" : "str2str_file.service", "name" : "file"},
-                 {'service_unit' : 'rtkbase_archive.timer', "name" : "archive_timer"},
-                 {'service_unit' : 'rtkbase_archive.service', "name" : "archive_service"},
-                 {'service_unit' : 'rtkbase_raw2nmea.service', "name" : "raw2nmea"},
-                 {'service_unit' : 'rtkbase_gnss_web_proxy.service', "name": "RTKBase Reverse Proxy for Gnss receiver Web Server"}
-                 ]
 
 #Delay before rtkrcv will stop if no user is on status.html page
 rtkcv_standby_delay = 600
@@ -166,8 +152,6 @@ def manager():
     """
     max_cpu_temp = 0
     cpu_temp_offset = int(rtkbaseconfig.get("general", "cpu_temp_offset"))
-    services_status = getServicesStatus(emit_pingback=False)
-    main_service = {}
     while True:
         # Make sure max_cpu_temp is always updated
         cpu_temp = get_cpu_temp() + cpu_temp_offset
@@ -175,12 +159,6 @@ def manager():
 
         if connected_clients > 0:
             # We only need to emit to the socket if there are clients able to receive it.
-            updated_services_status = getServicesStatus(emit_pingback=False)
-            main_service = updated_services_status[0]
-            if  services_status != updated_services_status:
-                services_status = updated_services_status
-                socketio.emit("services status", json.dumps(services_status), namespace="/test")
-                #print("service status", services_status)
 
             try:
                 interfaces_infos = network_infos.get_interfaces_infos()
@@ -199,38 +177,13 @@ def manager():
                         "network_infos" : interfaces_infos}
             socketio.emit("sys_informations", json.dumps(sys_infos), namespace="/test")
 
-        if rtk.sleep_count > rtkcv_standby_delay and rtk.state != "inactive" or \
-                 main_service.get("active") == False and rtk.state != "inactive":
+        if rtk.sleep_count > rtkcv_standby_delay and rtk.state != "inactive":
             print("DEBUG Stopping rtkrcv")
             if rtk.stopBase() == 1:
                 rtk.sleep_count = 0
         elif rtk.sleep_count > rtkcv_standby_delay:
             print("I'd like to stop rtkrcv (sleep_count = {}), but rtk.state is: {}".format(rtk.sleep_count, rtk.state))
         time.sleep(1)
-
-def repaint_services_button(services_list):
-    """
-       set service color on web app frontend depending on the service status:
-       status = running => green button
-        status = auto-restart => orange button (alert)
-        result = exit-code => red button (danger)
-    """ 
-    for service in services_list:
-        if service.get("status") == "running":
-            service["btn_color"] = "success"
-        #elif service.get("status") == "dead":
-        #    service["btn_color"] = "danger"
-        elif service.get("result") == "exit-code":
-            service["btn_color"] = "warning"
-        elif service.get("status") == "auto-restart":
-            service["btn_color"] = "warning"
-
-        if service.get("state_ok") == False:
-            service["btn_off_color"] = "outline-danger"
-        elif service.get("state_ok") == True:
-            service["btn_off_color"] = "outline-secondary"
-
-    return services_list
 
 def old_get_cpu_temp():
     try:
@@ -504,34 +457,6 @@ def logout():
     logout_user()
     return redirect(url_for('login_page'))
 
-@app.route('/diagnostic')
-@login_required
-def diagnostic():
-    """
-    Get services journal and status
-    """
-    getServicesStatus()
-    rtkbase_web_service = {'service_unit' : 'rtkbase_web.service', 'name' : 'RTKBase Web Server', 'active' : True}
-    logs = []
-    for service in services_list + [rtkbase_web_service]:
-        sysctl_status = subprocess.run(['systemctl', 'status', service['service_unit']],
-                                stdout=subprocess.PIPE,
-                                universal_newlines=True,
-                                check=False)
-        journalctl = subprocess.run(['journalctl', '--since', '7 days ago', '-u', service['service_unit']], 
-                                 stdout=subprocess.PIPE,
-                                 universal_newlines=True,
-                                 check=False)
-        
-        #Replace carrier return to <br> for html view
-        sysctl_status = html.escape(sysctl_status.stdout.replace('\n', '<br>'))
-        journalctl = html.escape(journalctl.stdout.replace('\n', '<br>'))
-        active_state = "Active" if service.get('active') == True else "Inactive"
-        logs.append({'name' : service['service_unit'], 'active' : active_state, 'sysctl_status' : sysctl_status, 'journalctl' : journalctl})
-        
-    return render_template('diagnostic.html', logs = logs)
-
-
 @app.route('/api/v1/infos', methods=['GET'])
 def get_infos():
     """Small api route to get basic informations about the base station"""
@@ -588,11 +513,6 @@ def shutdownBase():
 def startBase():
     saved_input_type = rtkbaseconfig.get("main", "receiver_format").strip("'")
     #check if the main service is running and the gnss format is correct. If not, don't try to start rtkrcv with startBase() 
-    if services_list[0].get("active") is False or saved_input_type not in ["rtcm2","rtcm3","nov","oem3","ubx","ss2","hemis","stq","javad","nvs","binex","rt17","sbf", "unicore"]:
-        print("DEBUG: Can't start rtkrcv as main service isn't enabled or gnss format is wrong")
-        result = {"result" : "failed"}
-        socketio.emit("base starting", json.dumps(result), namespace="/test")
-        return
     # We must start rtkcv before trying to modify an option
     rtk.startBase()
     saved_input_path = "localhost" + ":" + rtkbaseconfig.get("main", "tcp_port").strip("'")
@@ -664,12 +584,6 @@ def configure_receiver(brand="", model=""):
     # After port detection, the main service will be restarted, and it will take some time. But we have to stop it to
     # configure the receiver. We wait a few seconds before stopping it to remove conflicting calls.
     time.sleep(4)
-    main_service = services_list[0]
-    if main_service.get("active") is True:
-        main_service["unit"].stop()
-        restart_main = True
-    else:
-        restart_main = False
 
     print("configuring {} gnss receiver model {}".format(brand, model))
     answer = subprocess.run([os.path.join(rtkbase_path, "tools", "install.sh"), "--user", rtkbaseconfig.get("general", "user"), "--configure-gnss"], encoding="UTF-8", stderr=subprocess.PIPE, stdout=subprocess.PIPE, check=False)
@@ -681,9 +595,6 @@ def configure_receiver(brand="", model=""):
         rtkbaseconfig.reload_settings()
     else:
         result = {"result" : "failed"}
-    if restart_main is True:
-        #print("DEBUG: Restarting main service after F9P configuration")
-        main_service["unit"].start()
     #result = {"result" : "success"}
     socketio.emit("gnss_configuration_result", json.dumps(result), namespace="/test")
 
@@ -691,11 +602,9 @@ def configure_receiver(brand="", model=""):
 
 @socketio.on("reset settings", namespace="/test")
 def reset_settings():
-    switchService({"name":"main", "active":False})
     rtkbaseconfig.merge_default_and_user(os.path.join(rtkbase_path, "settings.conf.default"), os.path.join(rtkbase_path, "settings.conf.default"))
     rtkbaseconfig.expand_path()
     rtkbaseconfig.write_file()
-    update_std_user(services_list)
     socketio.emit("settings_reset", namespace="/test")
 
 @app.route("/logs/download/settings")
@@ -732,7 +641,6 @@ def restore_settings_file(json_msg):
         result= {"result" : "failed", "msg" : "Unknown error"}
     else:
         result= {"result" : "success", "msg" : "Successful restoration, You will be redirect to the login page in 5 seconds"}
-        restartServices()
     finally:
         socketio.emit("restore_settings_result", json.dumps(result), namespace="/test")
 
@@ -809,129 +717,6 @@ def turnOffWiFi():
 
 #### Systemd Services functions ####
 
-def load_units(services):
-    """
-        load unit service before getting status
-        :param services: A list of systemd services (dict) containing a service_unit key:value
-        :return The dict list updated with the pystemd ServiceController object
-
-        example: 
-            services = [{"service_unit" : "str2str_tcp.service"}]
-            return will be [{"service_unit" : "str2str_tcp.service", "unit" : a pystemd object}]
-        
-    """
-    for service in services:
-        service["unit"] = ServiceController(service["service_unit"])
-    return services
-
-def update_std_user(services):
-    """
-        check which user run str2str_file service and update settings.conf
-        :param services: A list of systemd services (dict) containing a service_unit key:value
-    """
-    service = next(x for x in services_list if x["name"] == "file")
-    user = service["unit"].getUser()
-    rtkbaseconfig.update_setting("general", "user", user)
-
-def restartServices(restart_services_list=None):
-    """
-        Restart already running services
-        This function will refresh all services status, then compare the global services_list and 
-        then restart_services_list to find the services we need to restart.
-        #TODO I don't really like this global services_list use.
-    """
-    if restart_services_list == None:
-        restart_services_list = [unit["name"] for unit in services_list if unit["name"] not in ("archive_timer", "archive_service")]
-    #Update services status
-    for service in services_list:
-        service["active"] = service["unit"].isActive()
-
-    #Restart running services
-    for restart_service in restart_services_list:
-        for service in services_list:
-            if service["name"] == restart_service and service["active"] is True:
-                print("Restarting service: ", service["name"])
-                if service["name"] == "main":
-                    #the main service should be stopped during at least 1 second to let rtkrcv stop too.
-                    #another solution would be to call rtk.stopbase()
-                    #service["unit"].stop()
-                    #time.sleep(1.5)
-                    #service["unit"].start()
-                    rtk.stopBase()
-                    service["unit"].restart()
-                else:
-                    service["unit"].restart()
-
-    #refresh service status
-    time.sleep(1)
-    getServicesStatus()
-
-@socketio.on("get services status", namespace="/test")
-def getServicesStatus(emit_pingback=True):
-    """
-        Get the status of services listed in services_list
-        (services_list is global)
-        
-        :param emit_pingback: whether or not the services status is sent to clients 
-            (defaults to true as the socketio.on() should receive back the information)
-        :return The gathered services status list
-    """
-
-    #print("Getting services status")
-    for service in services_list:
-        try:
-            #print("unit qui déconne : ", service["name"])
-            service["active"] = service["unit"].isActive()
-            service["status"] = service["unit"].status()
-            service["result"] = service["unit"].get_result()
-            if service.get("result") == "success" and service.get("status") == "running":
-                service["state_ok"] = True
-            elif service.get("result") == "exit-code":
-                service["state_ok"] = False
-            else:
-                service["state_ok"] = None
-
-        except Exception as e:
-            print("Error getting service info for: {} - {}".format(service['name'], e))
-            pass
-
-    services_status = []
-    for service in services_list:
-        services_status.append({key:service[key] for key in service if key != 'unit'})
-
-    services_status = repaint_services_button(services_status)
-    #print(services_status)
-    if emit_pingback:
-        socketio.emit("services status", json.dumps(services_status), namespace="/test")
-    return services_status
-
-@socketio.on("services switch", namespace="/test")
-def switchService(json_msg):
-    """
-        Start or stop some systemd services
-        As a service could need some time to start or stop, there is a 5 seconds sleep
-        before refreshing the status.
-        param: json_msg: A json var from the web front end containing one or more service
-        name with their new status.
-    """
-    #print("Received service to switch", json_msg)
-    try:
-        for service in services_list:
-            if json_msg["name"] == service["name"] and json_msg["active"] == True:
-                print("Trying to start service {}".format(service["name"]))
-                service["unit"].start()
-            elif json_msg["name"] == service["name"] and json_msg["active"] == False:
-                print("Trying to stop service {}".format(service["name"]))
-                service["unit"].stop()
-
-    except Exception as e:
-        print(e)
-    # finally not needed anymore since the service status is refreshed continuously
-    # with the manager
-    #finally:
-    #    time.sleep(5)
-    #    getServicesStatus()
-
 @socketio.on("form data", namespace="/test")
 def update_settings(json_msg):
     """
@@ -957,27 +742,6 @@ def update_settings(json_msg):
             rtkbaseconfig.update_setting(source_section, form_input.get("name"), form_input.get("value"), write_file=False)
         rtkbaseconfig.write_file()
 
-        #Restart service if needed
-        if source_section == "main":
-            restartServices(("main", "ntrip_A", "ntrip_B", "local_ntrip_caster", "rtcm_svr", "rtcm_client", "rtcm_udp_svr", "rtcm_udp_client", "file", "rtcm_serial", "raw2nmea"))  
-        elif source_section == "ntrip_A":
-            restartServices(("ntrip_A",))
-        elif source_section == "ntrip_B":
-            restartServices(("ntrip_B",))
-        elif source_section == "local_ntrip_caster":
-            restartServices(("local_ntrip_caster",))
-        elif source_section == "rtcm_svr":
-            restartServices(("rtcm_svr",))
-        elif source_section == "rtcm_client":
-            restartServices(("rtcm_client",))
-        elif source_section == "rtcm_udp_svr":
-            restartServices(("rtcm_udp_svr",))
-        elif source_section == "rtcm_udp_client":
-            restartServices(("rtcm_udp_client",))
-        elif source_section == "rtcm_serial":
-            restartServices(("rtcm_serial",))
-        elif source_section == "local_storage":
-            restartServices(("file",))
 
 def arg_parse():
     parser = argparse.ArgumentParser(
@@ -1011,10 +775,6 @@ if __name__ == "__main__":
             app.config["LOGIN_DISABLED"] = True
         #get data path
         app.config["DOWNLOAD_FOLDER"] = rtkbaseconfig.get("local_storage", "datadir").strip("'")
-        #load services status managed with systemd
-        services_list = load_units(services_list)
-        #Update standard user in settings.conf
-        update_std_user(services_list)
         #Start a "manager" thread
         manager_thread = Thread(target=manager, daemon=True)
         manager_thread.start()
